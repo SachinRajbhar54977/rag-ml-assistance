@@ -1,0 +1,1 @@
+venv, pip install -r requirements.txt, pip install -e .), where to put the PDF, how to run it (python -m rag_assistant.main, and uvicorn rag_assistant.api.app:app

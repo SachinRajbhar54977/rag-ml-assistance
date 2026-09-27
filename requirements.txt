@@ -1,0 +1,8 @@
+   pypdf
+   python-dotenv
+   fonttools
+   sentence-transformers
+   pymupdf
+   faiss-cpu
+   transformers 
+   accelerate
