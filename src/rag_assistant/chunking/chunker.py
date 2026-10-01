@@ -122,6 +122,118 @@ def _split_paragraph_into_units(paragraph: str, chunk_size: int, chunk_overlap: 
             units.append(sentence)
     return units
 
+# src/rag_assistant/chunking/chunker.py — replace the recursive-chunking section with this
+
+def split_into_sentences(text: str) -> list[str]:
+    """
+    Naive sentence splitter: split on '. ', '! ', '? ' followed by a
+    capital letter or end of string.
+    """
+    pattern = r'(?<=[.!?])\s+(?=[A-Z])'
+    sentences = re.split(pattern, text)
+    return [s.strip() for s in sentences if s.strip()]
+
+
+def _fallback_char_chunks(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
+    """Fallback utility to slice a single text block larger than chunk_size into character chunks."""
+    sub_chunks = []
+    start = 0
+    step = max(1, chunk_size - chunk_overlap)
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        piece = text[start:end].strip()
+        if piece:
+            sub_chunks.append(piece)
+        if end == len(text):
+            break
+        start += step
+    return sub_chunks
+
+
+def split_text_paragraph_sentence(text: str, chunk_size: int) -> list[str]:
+    """
+    Break text into paragraph/sentence-sized units.
+    Paragraphs that fit within chunk_size stay whole; longer paragraphs
+    are broken down into sentences.
+    """
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    units = []
+
+    for para in paragraphs:
+        if len(para) <= chunk_size:
+            units.append(para)
+        else:
+            units.extend(split_into_sentences(para))
+
+    return units
+
+
+def split_text_raw(text: str, chunk_size: int) -> list[str]:
+    """
+    No real splitting — return the whole text as a single unit.
+    Lets the packer's char-fallback logic do all the work, matching
+    the behavior of the original fixed-character chunker.
+    """
+    return [text] if text.strip() else []
+
+
+def pack_units_fixed_size(
+    units: list[str],
+    source: str,
+    page: int,
+    chunk_size: int = 500,
+    chunk_overlap: int = 50,
+) -> list[Chunk]:
+    """
+    Greedy packing loop taking pre-split units as input.
+    Packs units together into Chunks up to chunk_size, carrying trailing
+    units forward as overlap. Falls back to character slicing if any
+    single unit already exceeds chunk_size.
+    """
+    expanded_units = []
+    for unit in units:
+        if len(unit) > chunk_size:
+            expanded_units.extend(_fallback_char_chunks(unit, chunk_size, chunk_overlap))
+        else:
+            expanded_units.append(unit)
+
+    chunks: list[Chunk] = []
+    current_units: list[str] = []
+    chunk_index = 0
+
+    def seal_chunk():
+        nonlocal chunk_index
+        text = " ".join(current_units).strip()
+        if text:
+            chunks.append(Chunk(text=text, source=source, page=page, chunk_index=chunk_index))
+            chunk_index += 1
+
+    for unit in expanded_units:
+        if not current_units:
+            current_units.append(unit)
+            continue
+
+        candidate_text = " ".join(current_units) + " " + unit
+        if len(candidate_text) <= chunk_size:
+            current_units.append(unit)
+            continue
+
+        seal_chunk()
+
+        overlap_units = []
+        overlap_len = 0
+        for u in reversed(current_units):
+            if overlap_len + len(u) > chunk_overlap:
+                break
+            overlap_units.insert(0, u)
+            overlap_len += len(u) + 1
+
+        current_units = overlap_units + [unit]
+
+    seal_chunk()
+
+    return chunks
+
 
 def chunk_document_recursive(
     document: Document,
@@ -129,58 +241,10 @@ def chunk_document_recursive(
     chunk_overlap: int = 50,
 ) -> list[Chunk]:
     """
-    Split a Document's text by paragraph, then sentence, falling back
-    to character-based splitting only when a single sentence exceeds
-    chunk_size on its own. Units are packed greedily up to chunk_size,
-    with trailing units carried forward as overlap into the next chunk.
+    Compositional wrapper: split into paragraph/sentence units, then
+    pack them using fixed-size, character-count-based packing.
     """
     if not document.text.strip():
         return []
-
-    paragraphs = [p.strip() for p in document.text.split("\n\n") if p.strip()]
-
-    units: list[str] = []
-    for para in paragraphs:
-        units.extend(_split_paragraph_into_units(para, chunk_size, chunk_overlap))
-
-    chunks: list[Chunk] = []
-    current_units: list[str] = []
-    current_len = 0
-    chunk_index = 0
-
-    def seal_chunk():
-        nonlocal chunk_index
-        text = " ".join(current_units).strip()
-        if text:
-            chunks.append(Chunk(
-                text=text,
-                source=document.source,
-                page=document.page,
-                chunk_index=chunk_index,
-            ))
-            chunk_index += 1
-
-    for unit in units:
-        candidate_len = current_len + len(unit) + (1 if current_units else 0)
-
-        if current_units and candidate_len > chunk_size:
-            seal_chunk()
-
-            # Carry trailing units forward as overlap, up to chunk_overlap chars
-            overlap_units = []
-            overlap_len = 0
-            for u in reversed(current_units):
-                if overlap_len + len(u) > chunk_overlap:
-                    break
-                overlap_units.insert(0, u)
-                overlap_len += len(u) + 1
-
-            current_units = overlap_units
-            current_len = sum(len(u) for u in current_units) + max(0, len(current_units) - 1)
-
-        current_units.append(unit)
-        current_len += len(unit) + (1 if len(current_units) > 1 else 0)
-
-    seal_chunk()
-
-    return chunks
+    units = split_text_paragraph_sentence(document.text, chunk_size)
+    return pack_units_fixed_size(units, document.source, document.page, chunk_size, chunk_overlap)

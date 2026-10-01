@@ -6,3 +6,4 @@
    faiss-cpu
    transformers 
    accelerate
+   python-multipart

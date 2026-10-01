@@ -1,32 +1,47 @@
+# src/rag_assistant/generation/llm.py
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-_MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+# Module-level cache: model_name -> (tokenizer, model)
+_loaded_models: dict[str, tuple] = {}
 
-# Loaded once at import time — same reasoning as embed_documents in Phase 5.
-tokenizer = AutoTokenizer.from_pretrained(_MODEL_NAME)
-model = AutoModelForCausalLM.from_pretrained(
-    _MODEL_NAME,
-    torch_dtype=torch.float16,
-    device_map="cuda",
-)
 
-def generate_answer(prompt: str, max_new_tokens: int = 300, temperature: float = 0.1) -> str:
+def _get_model(model_name: str):
     """
-    Generate an answer from the LLM for a given prompt.
+    Return a cached (tokenizer, model) pair for model_name, loading it
+    from Hugging Face only the first time it's requested.
+    """
+    if model_name not in _loaded_models:
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            dtype=torch.float16,
+            device_map="cuda",
+        )
+        _loaded_models[model_name] = (tokenizer, model)
+    return _loaded_models[model_name]
+
+
+def generate_answer(
+    prompt: str,
+    model_name: str = "Qwen/Qwen2.5-1.5B-Instruct",
+    max_new_tokens: int = 300,
+    temperature: float = 0.1,
+) -> str:
+    """
+    Generate an answer from the chosen LLM for a given prompt.
     Returns only the newly generated text, not the echoed input prompt.
     """
     if not prompt.strip():
         return ""
 
-    # 1. Prepare inputs and move them to GPU
+    tokenizer, model = _get_model(model_name)
+
     inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
     input_length = inputs["input_ids"].shape[1]
 
-    # 2. Set sampling flags conditionally based on temperature
     do_sample = temperature > 0.0
 
-    # 3. Generate completion tokens
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
@@ -36,8 +51,5 @@ def generate_answer(prompt: str, max_new_tokens: int = 300, temperature: float =
             pad_token_id=tokenizer.eos_token_id,
         )
 
-    # 4. Slice off the input prompt tokens to keep only newly generated ones
     new_tokens = outputs[0][input_length:]
-
-    # 5. Decode and clean up special tokens
     return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
